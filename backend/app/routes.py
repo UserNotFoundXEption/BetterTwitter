@@ -1,0 +1,276 @@
+from flask import Blueprint, jsonify, request, render_template
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from time import time, sleep
+from collections import defaultdict
+from app import db
+from app.models import User
+from app.models import Message
+from app.models import LoginAttempt
+import jwt
+import datetime
+import os
+from argon2 import PasswordHasher
+from argon2.low_level import hash_secret, Type
+import rsa
+from app import utils
+import pyotp
+import qrcode
+import io
+import base64
+from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
+
+SECRET_KEY = 'your-secret-key'
+ph = PasswordHasher()
+api = Blueprint('api', __name__)
+users = {}
+limiter = Limiter(get_remote_address, app=None)
+login_attempts = defaultdict(lambda: {"count": 0, "last_attempt": 0, "block_until": 0})
+LOCK_TIME = 3600
+MAX_ATTEMPTS = 5
+DELAY_AFTER_LOGIN = 1
+
+@api.route('/')
+def home():
+    return render_template('index.html')
+
+@api.route('/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    username = utils.sanitize_content(data.get('username'))
+    email = utils.sanitize_content(data.get('email'))
+    password = utils.sanitize_content(data.get('password'))
+    
+    if len(username) > 32:
+        return jsonify({'error': 'Username too long (max 32 characters).'}), 400
+    
+    if len(email) > 32:
+        return jsonify({'error': 'Email too long (max 32 characters).'}), 400
+
+    if len(password) > 32:
+        return jsonify({'error': 'Password too long (max 32 characters).'}), 400
+    
+    password_verification_message = utils.verify_password(password)
+    if password_verification_message != "ok":
+        return jsonify({'error': password_verification_message}), 400
+
+    if User.query.filter_by(username=username).first():
+        return jsonify({'error': 'User already exists.'}), 400
+    
+    if User.query.filter_by(email=email).first():
+        return jsonify({'error': 'Email is already taken.'}), 400
+    
+    (public_key, private_key) = rsa.newkeys(2048)
+    private_key_pem = private_key.save_pkcs1().decode()
+    public_key_pem = public_key.save_pkcs1().decode()
+
+    salt1 = os.urandom(32)
+    salt2 = os.urandom(16)
+
+    salted_password = (password + salt1.hex()).encode()
+    hash1 = hash_secret(salted_password, salt1, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Type.I)
+    
+    salted_hash1 = (hash1.hex() + salt2.hex()).encode()
+    hash2 = hash_secret(salted_hash1, salt2, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Type.I)
+    
+    secret = pyotp.random_base32()
+    totp_secret = pyotp.TOTP(secret)
+    
+    uri = totp_secret.provisioning_uri(name=username, issuer_name="BetterTwitter")
+    qr = qrcode.make(uri)
+    buffer = io.BytesIO()
+    qr.save(buffer, format="PNG")
+    buffer.seek(0)
+    qr_base64 = base64.b64encode(buffer.getvalue()).decode()
+
+    users[username] = {
+        'email': email,
+        'hash2': hash2,
+        'salt1': salt1,
+        'salt2': salt2,
+        'private_key': private_key_pem,
+        'public_key': public_key_pem,
+        'secret' : secret
+    }
+    return jsonify({'message': 'Scan the QR code with your 2FA app.', 'qr_code': qr_base64})
+
+@api.route('/register/verify-totp', methods=['POST'])
+def register_verify_totp():
+    data = request.get_json()
+    username = utils.sanitize_content(data['username'])
+    totp_code = utils.sanitize_content(data['totp_code'])
+
+    user = users.get(username)
+    if not user:
+        return jsonify({'error': 'User not found.'}), 404
+
+    email = user['email']
+    hash2 = user['hash2']
+    salt1 = user['salt1']
+    salt2 = user['salt2']
+    private_key = user['private_key']
+    public_key = user['public_key']
+    secret = user['secret']
+    totp_secret = pyotp.TOTP(secret)
+    if not totp_secret.verify(totp_code):
+        return jsonify({'error': 'Invalid code'}), 401
+    
+    user = User(username=username, email=email, email_verified=False, password=hash2, salt1=salt1, salt2=salt2, private_key=private_key, public_key=public_key, totp_secret=secret)
+    db.session.add(user)
+    db.session.commit()
+    return jsonify({'message': 'Verification successful, registration complete.'})
+
+
+@api.route('/login', methods=['POST'])
+def login():
+    ip = get_remote_address()
+    print(ip)
+    print(request.remote_addr)
+    current_time = time()
+    attempts_data = login_attempts[ip]
+    
+    if current_time < attempts_data["block_until"]:
+        time_to_unblock = int((attempts_data["block_until"] - current_time) / 60)
+        return jsonify({'error': f'Too many failed attempts. Try again in {time_to_unblock} minutes.'}), 403
+    
+    sleep(DELAY_AFTER_LOGIN)
+
+    data = request.get_json()
+    username = utils.sanitize_content(data.get('username'))
+    password = utils.sanitize_content(data.get('password'))
+    totp_code = utils.sanitize_content(data.get('totpCode'))
+    user = User.query.filter_by(username=username).first()
+    successful = False
+
+    if user:
+        salt1 = user.salt1
+        salt2 = user.salt2
+    
+        salted_password = (password + salt1.hex()).encode()
+        hash1 = hash_secret(salted_password, salt1, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Type.I)
+
+        salted_hash1 = (hash1.hex() + salt2.hex()).encode()
+        hash2 = hash_secret(salted_hash1, salt2, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Type.I)
+
+        if hash2 == user.password:
+            totp_secret = pyotp.TOTP(user.totp_secret)
+            if totp_secret.verify(totp_code):
+                token = jwt.encode(
+                    {'user_id': user.id, 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)},
+                    SECRET_KEY,
+                    algorithm='HS256'
+                )
+                login_attempt = LoginAttempt(user_id=user.id, ip=ip, successful=True)
+                db.session.add(login_attempt)
+                db.session.commit()
+                login_attempts.pop(ip, None)
+                return jsonify({'token': token})
+        login_attempt = LoginAttempt(user_id=user.id, ip=ip, successful=False)
+        db.session.add(login_attempt)
+        db.session.commit()
+
+    attempts_data["count"] += 1
+    if attempts_data["count"] >= MAX_ATTEMPTS:
+        attempts_data["block_until"] = current_time + LOCK_TIME
+        return jsonify({'error': 'Too many failed attempts. You are blocked for 1 hour.'}), 403
+    login_attempts[ip] = attempts_data
+
+    return jsonify({'error': 'Invalid credentials.'}), 401
+
+@api.route('/login-attempts', methods=['GET'])
+def get_login_attempts():
+    try:
+        decoded = utils.validate_token(SECRET_KEY, request)
+        user_id = decoded['user_id']
+        user = User.query.get(user_id)
+
+        if not user:
+            return jsonify({'error': 'User not found.'}), 404
+
+        login_attempts = LoginAttempt.query.filter_by(user_id=user_id).order_by(LoginAttempt.time.desc()).all()
+        attempts_data = [
+            {
+                'time': attempt.time,
+                'ip': attempt.ip,
+                'successful': attempt.successful
+            }
+            for attempt in login_attempts
+        ]
+        return jsonify({'login_attempts': attempts_data}), 200
+    except ExpiredSignatureError:
+        return jsonify({'error': 'Session expired. Try to log in again.'}), 401
+    except InvalidTokenError:
+        return jsonify({'error': 'You don\'t have access to this place. Log in first.'}), 401
+
+
+@api.route('/messages', methods=['GET'])
+def get_messages():
+    messages = Message.query.all()
+    return jsonify([{'username': msg.username, 'content': msg.content, 'id': msg.id} for msg in messages])
+
+@api.route('/messages/send', methods=['POST'])
+def send_message():
+    data = request.get_json()
+    try:
+        decoded = utils.validate_token(SECRET_KEY, request)
+        user = User.query.get(decoded['user_id'])
+        if not user:
+            return jsonify({'error': 'User not found.'}), 404
+         
+        content = utils.sanitize_content(data.get('content'))
+        signature = utils.sign_message(content, user.private_key)
+        image_link = utils.extract_image_url(content)
+        if image_link is not None:
+            image_is_valid = utils.validate_image_size(image_link)
+            if not image_is_valid[0]:
+                print(image_is_valid)
+                return jsonify({'error': 'Image too big (max 1920x1080).'}), 401
+        
+        message = Message(username=user.username, content=content, signature=signature)
+        db.session.add(message)
+        db.session.commit()
+
+        return jsonify({'username': user.username, 'content': content, 'signature': signature})
+    except jwt.ExpiredSignatureError:
+        return jsonify({'error': 'Session expired. Try to log in again.'}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({'error': 'Not logged in. Log in first.'}), 401
+
+@api.route('/messages/verify/<int:message_id>', methods=['GET'])
+def verify_message(message_id):
+    message = Message.query.get(message_id)
+    if not message:
+        return jsonify({'error': 'Message not found.'}), 404
+
+    user = User.query.filter_by(username=message.username).first()
+    if not user:
+        return jsonify({'error': 'User not found.'}), 404
+
+    public_key = rsa.PublicKey.load_pkcs1(user.public_key.encode())
+
+    try:
+        rsa.verify(message.content.encode(), bytes.fromhex(message.signature), public_key)
+        verification_status = "Signature is valid"
+    except rsa.VerificationError:
+        verification_status = "Signature is invalid"
+
+    return jsonify({
+        'content': message.content,
+        'signature': message.signature,
+        'public_key': user.public_key,
+        'verification_status': verification_status
+    })
+
+@api.route('/validate_token', methods=['GET'])
+def validate_token_route():
+    try:
+        decoded = utils.validate_token(SECRET_KEY, request)
+        return jsonify({'valid': True, 'user_id': decoded['user_id']}), 200
+    except ExpiredSignatureError:
+        return jsonify({'valid': False, 'error': 'Session expired. Try to log in again.'}), 401
+    except InvalidTokenError:
+        return jsonify({'valid': False, 'error': 'Not logged in. Log in first.'}), 401
+
+
+def setup_routes(app):
+    app.register_blueprint(api)

@@ -1,0 +1,31 @@
+.message {
+  border: 2px solid #4caf50;
+  border-radius: 8px;
+  padding: 10px;
+  margin: 10px 15px;
+  background-color: #f9f9f9;
+  box-shadow: 2px 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.message-list {
+  list-style-type: none;
+  padding: 0;
+  margin: 0;
+}
+
+img {
+  max-width: 50%; 
+  max-height: 500px; 
+  width: auto; 
+  height: auto;
+}
+
+table {
+  border-collapse: seperate;
+  border-spacing: 10px;
+}
+
+th, td {
+  padding: 10px;
+  text-align: left;
+}

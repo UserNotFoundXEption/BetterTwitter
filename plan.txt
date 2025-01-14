@@ -1,0 +1,11 @@
+Backend
+Flask-User
+SQLAlchemy
+
+Frontend
+React
+SQLite
+
+Bezpieczeństwo i szyfrowanie
+samopodpisane certyfikaty SSL.
+Proxy przez NGINX
