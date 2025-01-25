@@ -19,13 +19,18 @@ import qrcode
 import io
 import base64
 from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
+from itsdangerous import URLSafeTimedSerializer
 
-SECRET_KEY = 'your-secret-key'
+SECRET_KEY = 'L9p$3#k!zF*Qxr8@WmD%vGH4YtCq&7J'
 ph = PasswordHasher()
 api = Blueprint('api', __name__)
-users = {}
 limiter = Limiter(get_remote_address, app=None)
+serializer = URLSafeTimedSerializer(SECRET_KEY)
+
+users = {}
 login_attempts = defaultdict(lambda: {"count": 0, "last_attempt": 0, "block_until": 0})
+password_reset_salt = {}
+
 LOCK_TIME = 3600
 MAX_ATTEMPTS = 5
 DELAY_AFTER_LOGIN = 1
@@ -42,14 +47,11 @@ def register():
     password = utils.sanitize_content(data.get('password'))
     
     if len(username) > 32:
-        return jsonify({'error': 'Username too long (max 32 characters).'}), 400
+        return jsonify({'error': 'Username too long. (max 32 characters)'}), 400
     
     if len(email) > 32:
-        return jsonify({'error': 'Email too long (max 32 characters).'}), 400
+        return jsonify({'error': 'Email too long. (max 32 characters)'}), 400
 
-    if len(password) > 32:
-        return jsonify({'error': 'Password too long (max 32 characters).'}), 400
-    
     password_verification_message = utils.verify_password(password)
     if password_verification_message != "ok":
         return jsonify({'error': password_verification_message}), 400
@@ -124,8 +126,6 @@ def register_verify_totp():
 @api.route('/login', methods=['POST'])
 def login():
     ip = get_remote_address()
-    print(ip)
-    print(request.remote_addr)
     current_time = time()
     attempts_data = login_attempts[ip]
     
@@ -153,8 +153,8 @@ def login():
         hash2 = hash_secret(salted_hash1, salt2, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Type.I)
 
         if hash2 == user.password:
-            totp_secret = pyotp.TOTP(user.totp_secret)
-            if totp_secret.verify(totp_code):
+            totp = pyotp.TOTP(user.totp_secret)
+            if totp.verify(totp_code):
                 token = jwt.encode(
                     {'user_id': user.id, 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)},
                     SECRET_KEY,
@@ -218,13 +218,15 @@ def send_message():
             return jsonify({'error': 'User not found.'}), 404
          
         content = utils.sanitize_content(data.get('content'))
+        if len(content) > 500:
+            return jsonify({'error': 'Message too long. (max 500 characters)'}), 400
         signature = utils.sign_message(content, user.private_key)
         image_link = utils.extract_image_url(content)
         if image_link is not None:
             image_is_valid = utils.validate_image_size(image_link)
             if not image_is_valid[0]:
                 print(image_is_valid)
-                return jsonify({'error': 'Image too big (max 1920x1080).'}), 401
+                return jsonify({'error': 'Image too big. (max 1920x1080)'}), 400
         
         message = Message(username=user.username, content=content, signature=signature)
         db.session.add(message)
@@ -271,6 +273,44 @@ def validate_token_route():
     except InvalidTokenError:
         return jsonify({'valid': False, 'error': 'Not logged in. Log in first.'}), 401
 
+@api.route('/request-password-reset', methods=['POST'])
+def request_password_reset():
+    data = request.get_json()
+    email = utils.sanitize_content(data.get('email'))
+
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        return jsonify({'error': 'Email not found.'}), 404
+
+    salt = os.urandom(32)
+    token = serializer.dumps(user.email, salt=salt)
+    password_reset_salt[token] = salt
+    reset_link = f'/reset-password/{token}'
+
+    return jsonify({'reset_link': reset_link}), 200
+
+@api.route('/reset-password/<token>', methods=['POST'])
+def reset_password(token):
+    try:
+        salt = password_reset_salt[token]
+        email = serializer.loads(token, salt=salt, max_age=3600)
+        data = request.get_json()
+        new_password = utils.sanitize_content(data.get('password'))
+        
+        password_verification_message = utils.verify_password(new_password)
+        if password_verification_message != "ok":
+            return jsonify({'error': password_verification_message}), 400
+        
+        user = User.query.filter_by(email=email).first()
+        if user:
+            user.password = new_password
+            db.session.commit()
+            return jsonify({'message': 'Password changed.'}), 200
+        else:
+            return jsonify({'error': 'User not found.'}), 404
+    except Exception as e:
+        print(e)
+        return jsonify({'error': 'Invalid or expired link.'}), 401
 
 def setup_routes(app):
     app.register_blueprint(api)

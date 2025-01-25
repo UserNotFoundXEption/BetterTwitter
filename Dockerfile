@@ -10,5 +10,5 @@ RUN /app/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 5000
 
-CMD {"/app/venv/bin/python3", "run.py"}
+CMD ["/app/venv/bin/python3", "run.py"]
 

@@ -7,6 +7,8 @@ import Dashboard from './components/Dashboard';
 import ProtectedRoute from './components/ProtectedRoute';
 import MessageDetails from './components/MessageDetails';
 import LoginAttempts from './components/LoginAttempts';
+import RequestPasswordReset from "./components/RequestPasswordReset";
+import ResetPassword from "./components/ResetPassword";
 
 function App() {
   return (
@@ -23,8 +25,10 @@ function App() {
 	    </ProtectedRoute>
 	  }
 	/>
-	<Route path="messages/verify/:messageId" element={<MessageDetails />} />
-        <Route path="login-attempts" element={<LoginAttempts />} />
+	<Route path="/messages/verify/:messageId" element={<MessageDetails />} />
+        <Route path="/login-attempts" element={<LoginAttempts />} />
+	<Route path="/request-password-reset" element={<RequestPasswordReset />} />
+        <Route path="/reset-password/:token" element={<ResetPassword />} />
 	<Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </Router>

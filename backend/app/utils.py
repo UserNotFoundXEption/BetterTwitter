@@ -37,9 +37,9 @@ def verify_password(password):
     if not password.isalnum():
         return 'Password has to be alphanueric.'
     if len(password) < 8:
-        return "Password is too short."
+        return "Password is too short. (minimum 8 characters)"
     if len(password) > 32:
-        return "Password is too long."
+        return "Password is too long. (max 32 characters)"
     if not is_password_strong(password):
         return "Password is too weak."
     if not is_password_uncommon(password):

@@ -55,6 +55,9 @@ const Login = () => {
 	  No account yet? <Link to="/register">Register here or die</Link>
       </p>
       <p>
+	  <Link to="/request-password-reset">Forgot password?</Link>
+      </p>
+      <p>
 	  Back to <Link to="/">Home page</Link>
       </p>
     </div>
