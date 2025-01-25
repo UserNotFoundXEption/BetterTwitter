@@ -10,8 +10,6 @@ from app.models import LoginAttempt
 import jwt
 import datetime
 import os
-from argon2 import PasswordHasher
-from argon2.low_level import hash_secret, Type
 import rsa
 from app import utils
 import pyotp
@@ -20,9 +18,9 @@ import io
 import base64
 from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 from itsdangerous import URLSafeTimedSerializer
+import datetime
 
 SECRET_KEY = 'L9p$3#k!zF*Qxr8@WmD%vGH4YtCq&7J'
-ph = PasswordHasher()
 api = Blueprint('api', __name__)
 limiter = Limiter(get_remote_address, app=None)
 serializer = URLSafeTimedSerializer(SECRET_KEY)
@@ -65,19 +63,11 @@ def register():
     (public_key, private_key) = rsa.newkeys(2048)
     private_key_pem = private_key.save_pkcs1().decode()
     public_key_pem = public_key.save_pkcs1().decode()
-
-    salt1 = os.urandom(32)
-    salt2 = os.urandom(16)
-
-    salted_password = (password + salt1.hex()).encode()
-    hash1 = hash_secret(salted_password, salt1, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Type.I)
     
-    salted_hash1 = (hash1.hex() + salt2.hex()).encode()
-    hash2 = hash_secret(salted_hash1, salt2, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Type.I)
+    salt1, salt2, hash2 = utils.hash_password_new(password)
     
     secret = pyotp.random_base32()
     totp_secret = pyotp.TOTP(secret)
-    
     uri = totp_secret.provisioning_uri(name=username, issuer_name="BetterTwitter")
     qr = qrcode.make(uri)
     buffer = io.BytesIO()
@@ -117,7 +107,7 @@ def register_verify_totp():
     if not totp_secret.verify(totp_code):
         return jsonify({'error': 'Invalid code'}), 401
     
-    user = User(username=username, email=email, email_verified=False, password=hash2, salt1=salt1, salt2=salt2, private_key=private_key, public_key=public_key, totp_secret=secret)
+    user = User(username=username, email=email, email_verified=False, password=hash2, last_password_change=datetime.datetime.utcnow(), salt1=salt1, salt2=salt2, private_key=private_key, public_key=public_key, totp_secret=secret)
     db.session.add(user)
     db.session.commit()
     return jsonify({'message': 'Verification successful, registration complete.'})
@@ -145,18 +135,14 @@ def login():
     if user:
         salt1 = user.salt1
         salt2 = user.salt2
-    
-        salted_password = (password + salt1.hex()).encode()
-        hash1 = hash_secret(salted_password, salt1, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Type.I)
-
-        salted_hash1 = (hash1.hex() + salt2.hex()).encode()
-        hash2 = hash_secret(salted_hash1, salt2, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Type.I)
-
+        hash2 = utils.hash_password(password, salt1, salt2)
         if hash2 == user.password:
             totp = pyotp.TOTP(user.totp_secret)
             if totp.verify(totp_code):
                 token = jwt.encode(
-                    {'user_id': user.id, 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)},
+                    {'user_id': user.id,
+                    'iat': datetime.datetime.utcnow(),
+                    'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)},
                     SECRET_KEY,
                     algorithm='HS256'
                 )
@@ -178,7 +164,7 @@ def login():
     return jsonify({'error': 'Invalid credentials.'}), 401
 
 @api.route('/login-attempts', methods=['GET'])
-def get_login_attempts():
+def login_attempts():
     try:
         decoded = utils.validate_token(SECRET_KEY, request)
         user_id = decoded['user_id']
@@ -204,12 +190,12 @@ def get_login_attempts():
 
 
 @api.route('/messages', methods=['GET'])
-def get_messages():
+def messages():
     messages = Message.query.all()
     return jsonify([{'username': msg.username, 'content': msg.content, 'id': msg.id} for msg in messages])
 
 @api.route('/messages/send', methods=['POST'])
-def send_message():
+def messages_send():
     data = request.get_json()
     try:
         decoded = utils.validate_token(SECRET_KEY, request)
@@ -239,7 +225,7 @@ def send_message():
         return jsonify({'error': 'Not logged in. Log in first.'}), 401
 
 @api.route('/messages/verify/<int:message_id>', methods=['GET'])
-def verify_message(message_id):
+def messages_verify(message_id):
     message = Message.query.get(message_id)
     if not message:
         return jsonify({'error': 'Message not found.'}), 404
@@ -264,9 +250,10 @@ def verify_message(message_id):
     })
 
 @api.route('/validate_token', methods=['GET'])
-def validate_token_route():
+def validate_token():
     try:
         decoded = utils.validate_token(SECRET_KEY, request)
+        print(123)
         return jsonify({'valid': True, 'user_id': decoded['user_id']}), 200
     except ExpiredSignatureError:
         return jsonify({'valid': False, 'error': 'Session expired. Try to log in again.'}), 401
@@ -281,6 +268,8 @@ def request_password_reset():
     user = User.query.filter_by(email=email).first()
     if not user:
         return jsonify({'error': 'Email not found.'}), 404
+    if user.email_verified:
+        return jsonify({'error': 'Can\'t send password reset request to unverified email.'}), 403
 
     salt = os.urandom(32)
     token = serializer.dumps(user.email, salt=salt)
@@ -303,7 +292,11 @@ def reset_password(token):
         
         user = User.query.filter_by(email=email).first()
         if user:
-            user.password = new_password
+            salt1, salt2, hash2 = utils.hash_password_new(new_password)
+            user.salt1 = salt1
+            user.salt2 = salt2
+            user.password = hash2
+            user.last_password_change = datetime.datetime.utcnow()
             db.session.commit()
             return jsonify({'message': 'Password changed.'}), 200
         else:
