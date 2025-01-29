@@ -16,10 +16,10 @@ function ResetPassword() {
 
     try {
       setError("");
-      const response = await fetch(`http://127.0.0.1:5000/reset-password/${token}`, {
+      const response = await fetch(`https://127.0.0.1/reset-password/${token}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ password })
       });
 
       const data = await response.json();

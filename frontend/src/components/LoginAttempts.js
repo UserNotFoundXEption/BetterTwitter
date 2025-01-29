@@ -8,7 +8,7 @@ const LoginAttempts = () => {
   useEffect(() => {
     const fetchLoginAttempts = async () => {
       try {
-        const response = await fetch(`http://127.0.0.1:5000/login-attempts`, {
+        const response = await fetch(`https://127.0.0.1/login-attempts`, {
           method: "GET",
           headers: {
             "Content-Type": "application/json",
@@ -31,7 +31,7 @@ const LoginAttempts = () => {
     };
 
     fetchLoginAttempts();
-  });
+  }, []);
 
   if (loading) {
     return <div>Loading...</div>;

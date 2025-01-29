@@ -7,11 +7,12 @@ const Register = () => {
   const [message, setMessage] = useState('');
   const [qrCode, setQrCode] = useState(null);
   const [step, setStep] = useState(1);
+  const [confirmationLink, setConfirmationLink] = useState("");
 
   const handleRegister = async (e) => {
     e.preventDefault();
     
-    const response = await fetch('http://127.0.0.1:5000/register', {
+    const response = await fetch('https://127.0.0.1/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, email, password }),
@@ -31,7 +32,7 @@ const Register = () => {
     e.preventDefault();
 
     const totpCode = prompt('Enter the code from your authernticator app:');
-    const response = await fetch('http://127.0.0.1:5000/register/verify-totp', {
+    const response = await fetch('https://127.0.0.1/register/verify-totp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, totp_code: totpCode }),
@@ -39,8 +40,8 @@ const Register = () => {
 
     const data = await response.json();
     if (response.ok) {
-      setMessage('Registration complete! You can now log in.');
-      setStep(3);
+      setMessage(data.message);
+      setConfirmationLink("http://127.0.0.1:3000" + data.link);
     } else {
       setMessage(data.error || 'Verification failed.');
     }
@@ -81,6 +82,7 @@ const Register = () => {
         </div>
       )}
       {message && <p>{message}</p>}
+      <a href={confirmationLink}>{confirmationLink}</a>
       <p>
         Already an awesome member? <Link to="/login">Login here</Link>
       </p>

@@ -7,6 +7,7 @@ from app import db
 from app.models import User
 from app.models import Message
 from app.models import LoginAttempt
+from app.models import EmailVerification
 import jwt
 import datetime
 import os
@@ -26,7 +27,7 @@ limiter = Limiter(get_remote_address, app=None)
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 
 users = {}
-login_attempts = defaultdict(lambda: {"count": 0, "last_attempt": 0, "block_until": 0})
+login_attempts_list = defaultdict(lambda: {"count": 0, "last_attempt": 0, "block_until": 0})
 password_reset_salt = {}
 
 LOCK_TIME = 3600
@@ -36,6 +37,7 @@ DELAY_AFTER_LOGIN = 1
 @api.route('/')
 def home():
     return render_template('index.html')
+
 
 @api.route('/register', methods=['POST'])
 def register():
@@ -86,6 +88,7 @@ def register():
     }
     return jsonify({'message': 'Scan the QR code with your 2FA app.', 'qr_code': qr_base64})
 
+
 @api.route('/register/verify-totp', methods=['POST'])
 def register_verify_totp():
     data = request.get_json()
@@ -109,26 +112,57 @@ def register_verify_totp():
     
     user = User(username=username, email=email, email_verified=False, password=hash2, last_password_change=datetime.datetime.utcnow(), salt1=salt1, salt2=salt2, private_key=private_key, public_key=public_key, totp_secret=secret)
     db.session.add(user)
+    
+    email_salt = os.urandom(32)
+    email_token = serializer.dumps(user.email, salt=email_salt)
+    email_verification = EmailVerification(token=email_token, salt=email_salt)
+    db.session.add(email_verification)
+    
     db.session.commit()
-    return jsonify({'message': 'Verification successful, registration complete.'})
+    
+    confirmation_link = f'/confirm-email/{email_token}'
+    
+    return jsonify({'message': f'Verification successful, registration complete. Email confirmation link that would normally be sent through email:', 'link': confirmation_link})
+
+
+@api.route('/confirm-email/<token>', methods=['POST'])
+def confirm_email(token):
+    try:
+        salt = EmailVerification.query.filter_by(token=token).first().salt 
+        email = serializer.loads(token, salt=salt)
+        
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return jsonify({'error': 'Invalid link.'}), 404
+        if not user.email_verified:
+            user.email_verified = True
+            db.session.commit()
+            return jsonify({'message': 'Email verified successfully.'}), 200
+        else:
+            return jsonify({'message': 'Email has already been verified.'}), 403
+    except:
+      pass
+    return jsonify({'error': 'Invalid link.'}), 404
 
 
 @api.route('/login', methods=['POST'])
 def login():
-    ip = get_remote_address()
-    current_time = time()
-    attempts_data = login_attempts[ip]
-    
-    if current_time < attempts_data["block_until"]:
-        time_to_unblock = int((attempts_data["block_until"] - current_time) / 60)
-        return jsonify({'error': f'Too many failed attempts. Try again in {time_to_unblock} minutes.'}), 403
-    
     sleep(DELAY_AFTER_LOGIN)
 
     data = request.get_json()
     username = utils.sanitize_content(data.get('username'))
     password = utils.sanitize_content(data.get('password'))
     totp_code = utils.sanitize_content(data.get('totpCode'))
+    
+    ip = utils.sanitize_content(data.get('ip'))
+    current_time = time()
+    attempts_data = login_attempts_list[ip]
+    
+    if current_time < attempts_data["block_until"]:
+        time_to_unblock = int((attempts_data["block_until"] - current_time) / 60)
+        return jsonify({'error': f'Too many failed attempts. Try again in {time_to_unblock} minutes.'}), 403
+    
+    
     user = User.query.filter_by(username=username).first()
     successful = False
 
@@ -149,7 +183,7 @@ def login():
                 login_attempt = LoginAttempt(user_id=user.id, ip=ip, successful=True)
                 db.session.add(login_attempt)
                 db.session.commit()
-                login_attempts.pop(ip, None)
+                login_attempts_list.pop(ip, None)
                 return jsonify({'token': token})
         login_attempt = LoginAttempt(user_id=user.id, ip=ip, successful=False)
         db.session.add(login_attempt)
@@ -159,9 +193,10 @@ def login():
     if attempts_data["count"] >= MAX_ATTEMPTS:
         attempts_data["block_until"] = current_time + LOCK_TIME
         return jsonify({'error': 'Too many failed attempts. You are blocked for 1 hour.'}), 403
-    login_attempts[ip] = attempts_data
+    login_attempts_list[ip] = attempts_data
 
     return jsonify({'error': 'Invalid credentials.'}), 401
+
 
 @api.route('/login-attempts', methods=['GET'])
 def login_attempts():
@@ -173,14 +208,14 @@ def login_attempts():
         if not user:
             return jsonify({'error': 'User not found.'}), 404
 
-        login_attempts = LoginAttempt.query.filter_by(user_id=user_id).order_by(LoginAttempt.time.desc()).all()
+        login_attempts_list = LoginAttempt.query.filter_by(user_id=user_id).order_by(LoginAttempt.time.desc()).all()
         attempts_data = [
             {
                 'time': attempt.time,
                 'ip': attempt.ip,
                 'successful': attempt.successful
             }
-            for attempt in login_attempts
+            for attempt in login_attempts_list
         ]
         return jsonify({'login_attempts': attempts_data}), 200
     except ExpiredSignatureError:
@@ -193,6 +228,7 @@ def login_attempts():
 def messages():
     messages = Message.query.all()
     return jsonify([{'username': msg.username, 'content': msg.content, 'id': msg.id} for msg in messages])
+
 
 @api.route('/messages/send', methods=['POST'])
 def messages_send():
@@ -224,6 +260,7 @@ def messages_send():
     except jwt.InvalidTokenError:
         return jsonify({'error': 'Not logged in. Log in first.'}), 401
 
+
 @api.route('/messages/verify/<int:message_id>', methods=['GET'])
 def messages_verify(message_id):
     message = Message.query.get(message_id)
@@ -249,16 +286,17 @@ def messages_verify(message_id):
         'verification_status': verification_status
     })
 
+
 @api.route('/validate_token', methods=['GET'])
 def validate_token():
     try:
         decoded = utils.validate_token(SECRET_KEY, request)
-        print(123)
         return jsonify({'valid': True, 'user_id': decoded['user_id']}), 200
     except ExpiredSignatureError:
         return jsonify({'valid': False, 'error': 'Session expired. Try to log in again.'}), 401
     except InvalidTokenError:
         return jsonify({'valid': False, 'error': 'Not logged in. Log in first.'}), 401
+
 
 @api.route('/request-password-reset', methods=['POST'])
 def request_password_reset():
@@ -268,7 +306,7 @@ def request_password_reset():
     user = User.query.filter_by(email=email).first()
     if not user:
         return jsonify({'error': 'Email not found.'}), 404
-    if user.email_verified:
+    if not user.email_verified:
         return jsonify({'error': 'Can\'t send password reset request to unverified email.'}), 403
 
     salt = os.urandom(32)
@@ -277,6 +315,7 @@ def request_password_reset():
     reset_link = f'/reset-password/{token}'
 
     return jsonify({'reset_link': reset_link}), 200
+
 
 @api.route('/reset-password/<token>', methods=['POST'])
 def reset_password(token):
@@ -302,8 +341,8 @@ def reset_password(token):
         else:
             return jsonify({'error': 'User not found.'}), 404
     except Exception as e:
-        print(e)
         return jsonify({'error': 'Invalid or expired link.'}), 401
+
 
 def setup_routes(app):
     app.register_blueprint(api)

@@ -6,7 +6,7 @@ const MessageDetails = () => {
   const [messageDetails, setMessageDetails] = useState(null);
 
   useEffect(() => {
-    fetch(`http://127.0.0.1:5000/messages/verify/${messageId}`)
+    fetch(`https://127.0.0.1/messages/verify/${messageId}`)
       .then((response) => response.json())
       .then((data) => setMessageDetails(data))
       .catch((error) => console.error("Error fetching message details:", error));

@@ -11,7 +11,7 @@ const Home = () => {
   useEffect(() => {
     const token = localStorage.getItem("token");
     if (token) {
-      fetch("http://127.0.0.1:5000/validate_token", {
+      fetch("https://127.0.0.1/validate_token", {
         method: "GET",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -29,7 +29,7 @@ const Home = () => {
       return <Navigate to="/dashboard" />;
     }
 
-    fetch("http://127.0.0.1:5000/messages")
+    fetch("https://127.0.0.1/messages")
       .then((response) => response.json())
       .then((data) => setMessages(data))
       .catch((error) => console.error("Error fetching messages:", error));
@@ -37,7 +37,7 @@ const Home = () => {
 
   return (
     <div>
-      <h1>BetterTwitter</h1>
+      <h1>Better Twitter</h1>
       <nav>
         <Link to="/login">Login</Link> | <Link to="/register">Register</Link>
       </nav>

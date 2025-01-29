@@ -27,3 +27,8 @@ class LoginAttempt(db.Model):
     ip = db.Column(db.String(45), nullable=False)
     time = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False)
     successful = db.Column(db.Boolean, nullable=False)
+    
+class EmailVerification(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    token = db.Column(db.String(300), nullable=False)
+    salt = db.Column(db.String(32), nullable=False)

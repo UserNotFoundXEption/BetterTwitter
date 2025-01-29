@@ -10,7 +10,7 @@ const Dashboard = () => {
   const navigate = useNavigate();
 
   useEffect(() => {
-    fetch('http://127.0.0.1:5000/messages')
+    fetch('https://127.0.0.1/messages')
       .then((response) => response.json())
       .then((data) => setMessages(data))
       .catch((error) => console.error('Error fetching messages:', error));
@@ -18,7 +18,7 @@ const Dashboard = () => {
 
   const sendMessage = async () => {
     const token = localStorage.getItem('token');
-    const response = await fetch('http://127.0.0.1:5000/messages/send', {
+    const response = await fetch('https://127.0.0.1/messages/send', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -50,7 +50,7 @@ const Dashboard = () => {
 
   return (
     <div>
-      <h1>BetterTwitter</h1>
+      <h1>Better Twitter</h1>
       <button onClick={handleLogout} style={{ marginBottom: "20px" }}>
         Logout
       </button>

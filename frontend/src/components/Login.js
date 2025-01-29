@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 
 const Login = () => {
@@ -6,16 +6,30 @@ const Login = () => {
   const [password, setPassword] = useState('');
   const [message, setMessage] = useState('');
   const [totpCode, setTotpCode] = useState('');
+  const [ip, setIp] = useState(''); 
+  
+  useEffect(() => {
+    const fetchPublicIp = async () => {
+      try {
+        const response = await fetch('https://api.ipify.org?format=json');
+        const data = await response.json();
+        setIp(data.ip);
+      } catch (error) {
+        console.error('Failed to fetch public IP:', error);
+      }
+    };
+    
+    fetchPublicIp();
+  }, []);
 
   const handleLogin = async (e) => {
     e.preventDefault();
-
-    const response = await fetch('http://127.0.0.1:5000/login', {
+    const response = await fetch('https://127.0.0.1/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, totpCode }),
+      body: JSON.stringify({ username, password, totpCode, ip }),
     });
-
+    
     const data = await response.json();
     if (response.ok) {
       localStorage.setItem('token', data.token); 

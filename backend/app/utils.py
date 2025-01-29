@@ -11,6 +11,8 @@ from io import BytesIO
 from PIL import Image
 import os
 from argon2.low_level import hash_secret, Type
+from app.models import User
+import datetime
 
 def sign_message(message, private_key):
     private_key = rsa.PrivateKey.load_pkcs1(private_key.encode())
@@ -36,7 +38,8 @@ def validate_token(SECRET_KEY, request):
         decoded = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
         user = User.query.get(decoded['user_id'])
         
-        last_password_change = user.last_password_change.timestamp()
+        last_password_change_timestamp = user.last_password_change.timestamp()
+        last_password_change = datetime.datetime.utcfromtimestamp(last_password_change_timestamp)
         token_iat = datetime.datetime.utcfromtimestamp(decoded['iat'])
         if last_password_change > token_iat:
             raise ExpiredSignatureError

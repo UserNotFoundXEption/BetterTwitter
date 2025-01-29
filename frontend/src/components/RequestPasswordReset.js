@@ -6,7 +6,7 @@ function RequestPasswordReset() {
 
   const handleRequestReset = async () => {
     try {
-      const response = await fetch("http://localhost:5000/request-password-reset", {
+      const response = await fetch("https://127.0.0.1/request-password-reset", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email }),

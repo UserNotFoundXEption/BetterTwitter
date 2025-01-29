@@ -11,8 +11,7 @@ const ProtectedRoute = ({ children }) => {
       return;
     }
 
-    // Sprawdź token na backendzie
-    fetch('http://127.0.0.1:5000/validate_token', {
+    fetch('https://127.0.0.1/validate_token', {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${token}`,
