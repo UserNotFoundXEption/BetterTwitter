@@ -346,3 +346,5 @@ def reset_password(token):
 
 def setup_routes(app):
     app.register_blueprint(api)
+    with app.app_context():
+        db.create_all()
