@@ -13,6 +13,10 @@ import os
 from argon2.low_level import hash_secret, Type
 from app.models import User
 import datetime
+import hashlib
+from Crypto.Cipher import AES
+import base64
+import sys
 
 def sign_message(message, private_key):
     private_key = rsa.PrivateKey.load_pkcs1(private_key.encode())
@@ -110,29 +114,35 @@ def extract_image_url(content):
     return match.group(1) if match else None
     
     
-def hash_password(password, salt1, salt2):
-    constant = "iWn4Ac8m94t827ny9v8732mr829u"
-    salt1 = modify_salt(salt1, constant)
-    salt2 = modify_salt(salt2, constant)
+def hash_password(password, salt):
+    salted_password = (password + salt.hex()).encode()
+    password_hash = hash_secret(salted_password, salt, time_cost=8, memory_cost=262144, parallelism=1, hash_len=32, type=Type.I)
+    return password_hash
+    
 
-    salted_password = (password + salt1.hex()).encode()
-    hash1 = hash_secret(salted_password, salt1, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Type.I)
+def get_env_var(var_name):
+    try:
+        return os.environ[var_name]
+    except KeyError:
+        raise RuntimeError(f"Not found: {var_name}")
+        
+
+def aes_encrypt(data, username, base_secret):
+    key = hashlib.sha256(f"{base_secret}{username}".encode()).digest()
+    cipher = AES.new(key, AES.MODE_GCM)
+    ciphertext, tag = cipher.encrypt_and_digest(data.encode())
+    encrypted_data = cipher.nonce + ciphertext + tag
+    return base64.b64encode(encrypted_data).decode()
     
-    salted_hash1 = (hash1.hex() + salt2.hex()).encode()
-    hash2 = hash_secret(salted_hash1, salt2, time_cost=2, memory_cost=102400, parallelism=8, hash_len=32, type=Type.I)
+
+def aes_decrypt(encrypted_data, username, base_secret):
+    key = hashlib.sha256(f"{base_secret}{username}".encode()).digest()
+    encrypted_data = base64.b64decode(encrypted_data)
     
-    return hash2
+    nonce = encrypted_data[:16]
+    ciphertext = encrypted_data[16:-16]
+    tag = encrypted_data[-16:]
     
-    
-def hash_password_new(password):
-    salt1 = os.urandom(32)
-    salt2 = os.urandom(16)
-    hash2 = hash_password(password, salt1, salt2)
-    
-    return salt1, salt2, hash2
-    
-    
-def modify_salt(salt, constant):
-    salt = salt.hex() + constant
-    return salt[::-1].encode()
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+    return cipher.decrypt_and_verify(ciphertext, tag).decode()
     

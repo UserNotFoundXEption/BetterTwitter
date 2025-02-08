@@ -8,6 +8,11 @@ COPY ./backend .
 COPY ./nginx/nginx.conf /etc/nginx/nginx.conf
 COPY ./certs /etc/nginx/certs
 
+ENV APP_SECRET="t6x/HgAZeUUJDBJtwbfnYLDOetC4lNqxkgJHN0DWZC0="
+ENV SALT_SECRET="C5582LPWwonCD27qpw4Tnz1OoeP4ptLaWB50RldNvso="
+ENV KEY_SECRET="7TAVi+Lxcs+nnNioRqADoaNYVzLMIyVRKIfJ4Fu7ng0="
+ENV TOTP_SECRET="DAUXOZ0VzhmDSmTXhQQoNS5DnmYJZls1m7ihA504KjI="
+
 RUN python3 -m venv /app/venv
 RUN /app/venv/bin/pip install --no-cache-dir -r requirements.txt -q > /dev/null 2>&1
 

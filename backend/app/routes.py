@@ -1,13 +1,8 @@
 from flask import Blueprint, jsonify, request, render_template
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from time import time, sleep
 from collections import defaultdict
 from app import db
-from app.models import User
-from app.models import Message
-from app.models import LoginAttempt
-from app.models import EmailVerification
+from app.models import User, UserTemp, Message, LoginAttempt, EmailVerification, PasswordChangeTemp
 import jwt
 import datetime
 import os
@@ -20,17 +15,17 @@ import base64
 from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 from itsdangerous import URLSafeTimedSerializer
 import datetime
+from datetime import timedelta
 
-SECRET_KEY = 'L9p$3#k!zF*Qxr8@WmD%vGH4YtCq&7J'
+APP_SECRET = utils.get_env_var("APP_SECRET")
+SALT_SECRET = utils.get_env_var("SALT_SECRET")
+KEY_SECRET = utils.get_env_var("KEY_SECRET")
+TOTP_SECRET = utils.get_env_var("TOTP_SECRET")
+
 api = Blueprint('api', __name__)
-limiter = Limiter(get_remote_address, app=None)
-serializer = URLSafeTimedSerializer(SECRET_KEY)
+serializer = URLSafeTimedSerializer(APP_SECRET)
 
-users = {}
-login_attempts_list = defaultdict(lambda: {"count": 0, "last_attempt": 0, "block_until": 0})
-password_reset_salt = {}
-
-LOCK_TIME = 3600
+LOCK_TIME = timedelta(seconds=3600)
 MAX_ATTEMPTS = 5
 DELAY_AFTER_LOGIN = 1
 
@@ -66,7 +61,8 @@ def register():
     private_key_pem = private_key.save_pkcs1().decode()
     public_key_pem = public_key.save_pkcs1().decode()
     
-    salt1, salt2, hash2 = utils.hash_password_new(password)
+    salt = os.urandom(32)
+    password_hash = utils.hash_password(password, salt)
     
     secret = pyotp.random_base32()
     totp_secret = pyotp.TOTP(secret)
@@ -76,16 +72,16 @@ def register():
     qr.save(buffer, format="PNG")
     buffer.seek(0)
     qr_base64 = base64.b64encode(buffer.getvalue()).decode()
+    
+    salt_base64 = base64.b64encode(salt).decode()
+    salt_encrypted = utils.aes_encrypt(salt_base64, username, SALT_SECRET)
+    private_key_encrypted = utils.aes_encrypt(private_key_pem, username, KEY_SECRET)
+    totp_secret_encrypted = utils.aes_encrypt(secret, username, TOTP_SECRET)
 
-    users[username] = {
-        'email': email,
-        'hash2': hash2,
-        'salt1': salt1,
-        'salt2': salt2,
-        'private_key': private_key_pem,
-        'public_key': public_key_pem,
-        'secret' : secret
-    }
+    userTemp = UserTemp(username=username, email=email, password_hash=password_hash, salt_encrypted=salt_encrypted, private_key_encrypted=private_key_encrypted, public_key=public_key_pem, totp_secret_encrypted=totp_secret_encrypted)
+    db.session.add(userTemp)
+    db.session.commit()
+    
     return jsonify({'message': 'Scan the QR code with your 2FA app.', 'qr_code': qr_base64})
 
 
@@ -95,29 +91,40 @@ def register_verify_totp():
     username = utils.sanitize_content(data['username'])
     totp_code = utils.sanitize_content(data['totp_code'])
 
-    user = users.get(username)
-    if not user:
+    userTemp = UserTemp.query.filter_by(username=username).first()
+    if not userTemp:
         return jsonify({'error': 'User not found.'}), 404
 
-    email = user['email']
-    hash2 = user['hash2']
-    salt1 = user['salt1']
-    salt2 = user['salt2']
-    private_key = user['private_key']
-    public_key = user['public_key']
-    secret = user['secret']
+    totp_secret_encrypted = userTemp.totp_secret_encrypted
+    secret = utils.aes_decrypt(totp_secret_encrypted, username, TOTP_SECRET)
     totp_secret = pyotp.TOTP(secret)
     if not totp_secret.verify(totp_code):
         return jsonify({'error': 'Invalid code'}), 401
     
-    user = User(username=username, email=email, email_verified=False, password=hash2, last_password_change=datetime.datetime.utcnow(), salt1=salt1, salt2=salt2, private_key=private_key, public_key=public_key, totp_secret=secret)
-    db.session.add(user)
+    email = userTemp.email
+    password_hash = userTemp.password_hash
+    salt_encrypted = userTemp.salt_encrypted
+    private_key_encrypted = userTemp.private_key_encrypted
+    public_key = userTemp.public_key
+    
+    user = User(
+        username=username, 
+        email=email, 
+        email_verified=False, 
+        password_hash=password_hash, 
+        salt_encrypted=salt_encrypted, 
+        private_key_encrypted=private_key_encrypted, 
+        public_key=public_key, 
+        totp_secret_encrypted=totp_secret_encrypted,
+        last_password_change=datetime.datetime.utcnow())
     
     email_salt = os.urandom(32)
     email_token = serializer.dumps(user.email, salt=email_salt)
     email_verification = EmailVerification(token=email_token, salt=email_salt)
-    db.session.add(email_verification)
     
+    db.session.add(user)
+    db.session.delete(userTemp)
+    db.session.add(email_verification)
     db.session.commit()
     
     confirmation_link = f'/confirm-email/{email_token}'
@@ -147,61 +154,59 @@ def confirm_email(token):
 
 @api.route('/login', methods=['POST'])
 def login():
-    sleep(DELAY_AFTER_LOGIN)
-
     data = request.get_json()
     username = utils.sanitize_content(data.get('username'))
     password = utils.sanitize_content(data.get('password'))
     totp_code = utils.sanitize_content(data.get('totpCode'))
-    
     ip = utils.sanitize_content(data.get('ip'))
-    current_time = time()
-    attempts_data = login_attempts_list[ip]
-    
-    if current_time < attempts_data["block_until"]:
-        time_to_unblock = int((attempts_data["block_until"] - current_time) / 60)
-        return jsonify({'error': f'Too many failed attempts. Try again in {time_to_unblock} minutes.'}), 403
-    
     
     user = User.query.filter_by(username=username).first()
     successful = False
 
     if user:
-        salt1 = user.salt1
-        salt2 = user.salt2
-        hash2 = utils.hash_password(password, salt1, salt2)
-        if hash2 == user.password:
-            totp = pyotp.TOTP(user.totp_secret)
+        failed_logins = user.failed_logins
+        last_failed_login = user.last_failed_login
+        current_time = datetime.datetime.utcnow()
+        if current_time - last_failed_login < timedelta(seconds=1):
+            return jsonify({'error': f'Slow down!'}), 403   
+        if failed_logins >= 5 and current_time - last_failed_login < LOCK_TIME:
+            time_to_unblock = int((last_failed_login + LOCK_TIME - current_time).total_seconds() / 60)
+            return jsonify({'error': f'Too many failed attempts. Try again in {time_to_unblock} minutes.'}), 403
+        
+        salt_base64 = utils.aes_decrypt(user.salt_encrypted, username, SALT_SECRET)
+        salt = base64.b64decode(salt_base64)
+        password_hash = utils.hash_password(password, salt)
+        if password_hash == user.password_hash:
+        
+            totp_secret = utils.aes_decrypt(user.totp_secret_encrypted, username, TOTP_SECRET)
+            totp = pyotp.TOTP(totp_secret)
             if totp.verify(totp_code):
+            
                 token = jwt.encode(
                     {'user_id': user.id,
                     'iat': datetime.datetime.utcnow(),
                     'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)},
-                    SECRET_KEY,
+                    APP_SECRET,
                     algorithm='HS256'
                 )
+                user.failed_logins = 0
                 login_attempt = LoginAttempt(user_id=user.id, ip=ip, successful=True)
                 db.session.add(login_attempt)
                 db.session.commit()
-                login_attempts_list.pop(ip, None)
                 return jsonify({'token': token})
+                
+        user.failed_logins = user.failed_logins + 1
         login_attempt = LoginAttempt(user_id=user.id, ip=ip, successful=False)
         db.session.add(login_attempt)
         db.session.commit()
-
-    attempts_data["count"] += 1
-    if attempts_data["count"] >= MAX_ATTEMPTS:
-        attempts_data["block_until"] = current_time + LOCK_TIME
-        return jsonify({'error': 'Too many failed attempts. You are blocked for 1 hour.'}), 403
-    login_attempts_list[ip] = attempts_data
-
+        
     return jsonify({'error': 'Invalid credentials.'}), 401
 
 
 @api.route('/login-attempts', methods=['GET'])
 def login_attempts():
     try:
-        decoded = utils.validate_token(SECRET_KEY, request)
+        decoded = utils.validate_token(APP_SECRET, request)
         user_id = decoded['user_id']
         user = User.query.get(user_id)
 
@@ -234,7 +239,7 @@ def messages():
 def messages_send():
     data = request.get_json()
     try:
-        decoded = utils.validate_token(SECRET_KEY, request)
+        decoded = utils.validate_token(APP_SECRET, request)
         user = User.query.get(decoded['user_id'])
         if not user:
             return jsonify({'error': 'User not found.'}), 404
@@ -242,7 +247,8 @@ def messages_send():
         content = utils.sanitize_content(data.get('content'))
         if len(content) > 500:
             return jsonify({'error': 'Message too long. (max 500 characters)'}), 400
-        signature = utils.sign_message(content, user.private_key)
+        private_key = utils.aes_decrypt(user.private_key_encrypted, user.username, KEY_SECRET)
+        signature = utils.sign_message(content, private_key)
         image_link = utils.extract_image_url(content)
         if image_link is not None:
             image_is_valid = utils.validate_image_size(image_link)
@@ -290,7 +296,7 @@ def messages_verify(message_id):
 @api.route('/validate_token', methods=['GET'])
 def validate_token():
     try:
-        decoded = utils.validate_token(SECRET_KEY, request)
+        decoded = utils.validate_token(APP_SECRET, request)
         return jsonify({'valid': True, 'user_id': decoded['user_id']}), 200
     except ExpiredSignatureError:
         return jsonify({'valid': False, 'error': 'Session expired. Try to log in again.'}), 401
@@ -311,7 +317,16 @@ def request_password_reset():
 
     salt = os.urandom(32)
     token = serializer.dumps(user.email, salt=salt)
-    password_reset_salt[token] = salt
+    
+    salt_base64 = base64.b64encode(salt).decode()
+    salt_encrypted = utils.aes_encrypt(salt_base64, user.username, SALT_SECRET)
+    passwordChangeTemp = PasswordChangeTemp(
+        token=token,
+        salt_encrypted=salt_encrypted,
+        user_id=user.id)
+    db.session.add(passwordChangeTemp)
+    db.session.commit()
+    
     reset_link = f'/reset-password/{token}'
 
     return jsonify({'reset_link': reset_link}), 200
@@ -320,7 +335,16 @@ def request_password_reset():
 @api.route('/reset-password/<token>', methods=['POST'])
 def reset_password(token):
     try:
-        salt = password_reset_salt[token]
+        passwordChangeTemp = PasswordChangeTemp.query.filter_by(token=token).first()
+        if not passwordChangeTemp:
+            return jsonify({'error': 'Invalid or expired link.'}), 401
+            
+        user = User.query.filter_by(id=passwordChangeTemp.user_id).first()
+        if not user:
+            return jsonify({'error': 'User not found.'}), 404
+            
+        salt_base64 = utils.aes_decrypt(passwordChangeTemp.salt_encrypted, user.username, SALT_SECRET)
+        salt = base64.b64decode(salt_base64)
         email = serializer.loads(token, salt=salt, max_age=3600)
         data = request.get_json()
         new_password = utils.sanitize_content(data.get('password'))
@@ -329,17 +353,16 @@ def reset_password(token):
         if password_verification_message != "ok":
             return jsonify({'error': password_verification_message}), 400
         
-        user = User.query.filter_by(email=email).first()
-        if user:
-            salt1, salt2, hash2 = utils.hash_password_new(new_password)
-            user.salt1 = salt1
-            user.salt2 = salt2
-            user.password = hash2
-            user.last_password_change = datetime.datetime.utcnow()
-            db.session.commit()
-            return jsonify({'message': 'Password changed.'}), 200
-        else:
-            return jsonify({'error': 'User not found.'}), 404
+        password_hash = utils.hash_password(new_password, salt)
+        user.salt_encrypted = passwordChangeTemp.salt_encrypted
+        user.password_hash = password_hash
+        user.last_password_change = datetime.datetime.utcnow()
+        
+        db.session.delete(passwordChangeTemp)
+        db.session.commit()
+        
+        return jsonify({'message': 'Password changed.'}), 200
+            
     except Exception as e:
         return jsonify({'error': 'Invalid or expired link.'}), 401
 
